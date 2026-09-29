@@ -1,91 +1,205 @@
-# Pump Acoustic Anomaly Detection
+<div align="center">
 
-Comparing deep learning and classical ML approaches for detecting abnormal pump operation from audio, on a small (622-sample) industrial acoustic dataset.
+# 🔊 Pump Acoustic Anomaly Detection
 
-## Problem
+**Can a machine *hear* when a pump is about to fail?**
+Deep learning vs. classical ML on a small industrial audio dataset.
 
-Given a `.wav` recording of a pump in operation, classify it as **normal** or **abnormal**. This is a binary classification task relevant to predictive maintenance — catching mechanical faults from sound before they cause downtime.
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MuhammadSarimUmer/Pump-Acoustic-Anomaly-Detection/blob/main/main.ipynb)
 
-**Dataset:** Kaggle "AI Paradox" competition — 622 labeled training clips (normal/abnormal folders), 156 unlabeled test clips, evaluated on F1 score for the abnormal class. Competition deadline (Oct 16, 2025) had already passed by the time of this project; submissions were scored as late/practice entries, not ranked on a live leaderboard.
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
+![TensorFlow](https://img.shields.io/badge/TensorFlow-Keras-FF6F00?logo=tensorflow&logoColor=white)
+![LightGBM](https://img.shields.io/badge/LightGBM-Gradient%20Boosting-2E8B57)
+![Librosa](https://img.shields.io/badge/Librosa-Audio%20DSP-8A2BE2)
+![Best Kaggle F1](https://img.shields.io/badge/Best%20Kaggle%20F1-0.883-brightgreen)
 
-**Class balance:** ~427 normal / ~135 abnormal in training data (roughly 3:1 imbalance).
+</div>
 
-## Approach 1: Baseline CNN (from scratch)
+---
 
-Audio converted to 128×128 mel spectrograms (Librosa, 128 mel bands, 1024 FFT window, 512 hop length), fed into a small 3-block CNN (16→32→64 filters, GlobalAveragePooling, Dropout) trained from scratch — 27,521 parameters total.
+## 📌 Overview
 
-Minority class (abnormal) was augmented 3x (time shift, pitch shift, light noise) to roughly balance the training set before this split, giving 761 training / 125 validation spectrograms.
+Given a `.wav` recording of a pump in operation, classify it as **normal** or **abnormal**. This is a core predictive-maintenance problem: catch mechanical faults from sound *before* they cause downtime.
 
-An early version of this model used BatchNormalization and collapsed to predicting a single class on validation (val_recall frozen at 1.0, val_precision frozen at the class prior) — traced to BatchNorm's running statistics being unstable on a dataset this small. Removing BatchNorm and lowering the learning rate to 0.0005 fixed this.
+I built and compared **three approaches** on the same data to find out what actually works when you only have a few hundred labeled clips.
 
-**Result (validation):**
+| | |
+|---|---|
+| **Dataset** | Kaggle *AI Paradox* competition: 622 labeled training clips, 156 unlabeled test clips |
+| **Metric** | F1 score on the **abnormal** class |
+| **Class balance** | About 457 normal / 165 abnormal (≈ 2.8 : 1) |
+| **Note** | The competition deadline (Oct 16, 2025) had already passed, so submissions were scored as late/practice entries and not ranked on a live leaderboard |
+
+---
+
+## 🏆 Results at a Glance
+
+| Approach | Val Abnormal F1 | Val Macro F1 | Kaggle Score |
+|---|:---:|:---:|:---:|
+| 🧱 CNN (from scratch) | 0.72 | 0.81 | n/a |
+| 🧠 MobileNetV2, frozen features | 0.91 | 0.94 | 0.72500 |
+| 🧠 MobileNetV2, fine-tuned | 0.91 | n/a | 0.74698 |
+| 🌲 **LightGBM (hand-crafted features)** | **0.96** | **0.97** | **0.88311** |
+
+<div align="center">
+  <img src="assets/results_comparison.png" alt="Approach comparison: validation F1 vs Kaggle score" width="720">
+</div>
+
+> **Key takeaway:** the simplest model won. 38 hand-crafted audio features + gradient boosting beat pretrained deep learning by about **13 points** on the held-out test set.
+
+---
+
+## 🗂️ Pipeline
+
+```mermaid
+flowchart LR
+    A[🎧 .wav clips, 16 kHz] --> B{Representation}
+    B -->|Mel spectrogram 128x128| C[CNN from scratch]
+    B -->|Mel spectrogram, 3 channels| D[MobileNetV2 transfer learning]
+    B -->|38 Librosa features| E[LightGBM]
+    C --> F[Threshold tuning]
+    D --> F
+    E --> F
+    F --> G[📊 Normal / Abnormal]
+```
+
+---
+
+## 🔬 Approaches
+
+### 1️⃣ Baseline CNN (from scratch)
+
+- Audio (resampled to 16 kHz) → **128×128 mel spectrograms** (128 mel bands, 1024 FFT window, 512 hop length). Each clip is padded or truncated to 128 frames (~4.1 s) and scaled to [0, 1].
+- Small 3-block CNN (16 → 32 → 64 filters, GlobalAveragePooling, Dense 64, Dropout 0.4), only **27,521 parameters**
+- Clips are **split 80/20 (stratified) first**, then each *training* abnormal clip gets 2 augmented copies (time shift, pitch shift ±2 semitones, light noise). Validation clips are never augmented. Result: 761 training / 125 validation spectrograms.
+
+<details>
+<summary><b>🐛 Debugging story: the model that predicted one class</b></summary>
+
+<br>
+
+An early version with **BatchNormalization** collapsed to a single class on validation: `val_recall` frozen at 1.0 and `val_precision` frozen at the class prior. I traced it to BatchNorm's running statistics being unstable on such a small dataset. Removing BatchNorm and lowering the learning rate to `0.0005` fixed it.
+
+</details>
+
 | Metric | Normal | Abnormal |
-|---|---|---|
+|---|:---:|:---:|
 | Precision | 0.89 | 0.74 |
 | Recall | 0.91 | 0.70 |
 | F1 | 0.90 | 0.72 |
 
-Macro F1: 0.81
+**Macro F1: 0.81**
 
-## Approach 2: Transfer Learning (MobileNetV2)
+---
 
-Same spectrograms, duplicated to 3 channels to match MobileNetV2's expected RGB input. ImageNet-pretrained MobileNetV2 used as a frozen feature extractor (2.34M total params, only 82K trainable in the new classification head) for initial training, then fine-tuned by unfreezing the last 30 layers of the base model (1.6M trainable params) at a much lower learning rate (1e-5, vs 5e-4 for the frozen phase) to avoid catastrophic forgetting of pretrained features.
+### 2️⃣ Transfer Learning (MobileNetV2)
 
-Decision threshold tuned on validation via F1 sweep (best: 0.34, vs default 0.5).
+- Same spectrograms, duplicated to 3 channels to match MobileNetV2's RGB input
+- **Phase 1:** ImageNet-pretrained base frozen (2.34M total params, only 82K trainable in the new head), LR `5e-4`
+- **Phase 2:** unfroze the last 30 layers (1.6M trainable) at LR `1e-5` to avoid catastrophic forgetting
+- `EarlyStopping` (patience 6) and `ReduceLROnPlateau` on validation loss
+- Decision threshold tuned on validation via F1 sweep (best **0.34** vs default 0.5)
 
-**Result (validation, frozen-feature model — fine-tuning matched but did not improve this):**
 | Metric | Normal | Abnormal |
-|---|---|---|
+|---|:---:|:---:|
 | Precision | 0.96 | 0.94 |
 | Recall | 0.98 | 0.88 |
 | F1 | 0.97 | 0.91 |
 
-Macro F1: 0.94
+**Macro F1: 0.94** (frozen model; fine-tuning matched but did not improve it)
+**Kaggle:** 0.72500 (frozen, threshold 0.5) → 0.74698 (fine-tuned, threshold 0.34)
 
-**Kaggle test score:** 0.72500 (frozen-feature model, threshold 0.5) → 0.74698 (fine-tuned model, tuned threshold 0.34)
+---
 
-## Approach 3: Classical ML (hand-crafted features + LightGBM)
+### 3️⃣ Classical ML: hand-crafted features + LightGBM ⭐
 
-Instead of spectrogram images, each clip was reduced to 34 hand-crafted numeric features via Librosa: 13 MFCCs (mean + std), spectral centroid, spectral bandwidth, spectral rolloff, zero-crossing rate, RMS energy, and chroma (mean + std each).
+Instead of images, each full-length clip is reduced to **38 numeric features** via Librosa:
 
-LightGBM classifier (300 estimators, learning_rate 0.05, max_depth 5, num_leaves 15) trained on these tabular features, with `scale_pos_weight` set from the train class ratio to handle imbalance directly rather than via augmentation. Decision threshold tuned on validation (best: 0.62).
+- 13 **MFCCs** (mean + std → 26 features)
+- Spectral centroid, bandwidth, rolloff, zero-crossing rate, RMS energy (mean + std each → 10 features)
+- Chroma (mean + std over all bins → 2 features)
 
-**Result (validation):**
+LightGBM (300 estimators, `learning_rate=0.05`, `max_depth=5`, `num_leaves=15`) with `scale_pos_weight` computed from the class ratio to handle imbalance directly, without augmentation. Same stratified 80/20 split (`random_state=42`). Decision threshold tuned on validation (best **0.62**).
+
 | Metric | Normal | Abnormal |
-|---|---|---|
+|---|:---:|:---:|
 | Precision | 0.99 | 0.94 |
 | Recall | 0.98 | 0.97 |
 | F1 | 0.98 | 0.96 |
 
-Macro F1: 0.97
+**Macro F1: 0.97 · Kaggle score: 0.88311** (best of the three)
 
-**Kaggle test score: 0.88311** — best of the three approaches.
+---
 
-## Results Comparison
+## 🔍 Confusion Matrices (Validation)
 
-| Approach | Val Abnormal F1 | Val Macro F1 | Kaggle Score |
-|---|---|---|---|
-| CNN (scratch) | 0.72 | 0.81 | — |
-| CNN + Transfer Learning (frozen) | 0.91 | 0.94 | 0.72500 |
-| CNN + Transfer Learning (fine-tuned) | 0.91 | — | 0.74698 |
-| **LightGBM (hand-crafted features)** | **0.96** | **0.97** | **0.88311** |
+<div align="center">
+  <img src="assets/confusion_matrices_comparison.png" alt="Confusion matrices: MobileNetV2 vs LightGBM" width="820">
+</div>
 
-Note the gap between validation and Kaggle scores for the CNN approaches (0.91 val F1 → 0.725-0.747 test) versus LightGBM's smaller gap (0.96 val F1 → 0.883 test). This is discussed below.
+LightGBM misses **1** abnormal pump versus **4** for the frozen CNN, on the same 125-sample validation set. In predictive maintenance, a missed fault is the costly error.
 
-## Analysis: why LightGBM outperformed the CNN approaches here
+---
 
-This is reasoned analysis based on the results observed above, not a proven root cause — a proper ablation (e.g. testing LightGBM on spectrogram-derived features, or a CNN on hand-crafted features) would be needed to isolate whether this is a representation effect, a model-family effect, or both.
+## 🧠 Why did LightGBM win?
 
-1. **Dataset size.** 622 training samples is small for image-shaped input. CNNs, even with transfer learning, adapt many parameters and generally need more data to generalize reliably on raw pixel-like input than tabular models need on compact, pre-summarized features.
-2. **Spectrograms-as-images carry more irrelevant surface area.** A 128×128 grid gives a CNN far more opportunity to latch onto spurious spatial patterns (exact timing, background noise position) than a 34-number feature vector allows.
-3. **Hand-crafted features are domain-informed compressions.** MFCCs, spectral centroid, RMS, etc. discard exactly the kind of irrelevant variation a CNN has to learn to ignore the hard way, from data alone.
-4. **Distribution shift between train and test.** The validation split came from the same recordings as training data; the real Kaggle test set may differ in recording conditions. Robust summary statistics (used by LightGBM) tend to be less sensitive to this than pixel-level CNN features.
-5. This matches a known pattern in small-data audio ML: classical feature engineering + gradient boosting often outperforms deep learning until dataset size reaches into the thousands of samples per class.
+> This is reasoned analysis from the results, **not a proven root cause**. A proper ablation (e.g. LightGBM on spectrogram-derived features, or a CNN on hand-crafted features) would be needed to isolate the effect.
 
-## Limitations
+1. **Small data.** 622 clips is little for image-shaped input; even transfer learning adapts many parameters.
+2. **Spectrograms have lots of irrelevant surface area.** A 128×128 grid lets a CNN latch onto spurious patterns (exact timing, background-noise position).
+3. **Hand-crafted features are domain-informed compressions.** MFCCs, centroid, RMS, etc. discard the variation a CNN would have to learn to ignore from data alone.
+4. **Full-clip vs. truncated input.** The CNNs only see the first ~4.1 s of each clip, while the LightGBM features summarise the whole recording. This is a confound worth testing.
+5. **Possible train/test shift.** Validation came from the same recordings as training; the Kaggle test set may differ. Summary statistics tend to be more robust to this.
+6. **Consistent with a known pattern:** in small-data audio ML, feature engineering + gradient boosting often beats deep learning until you reach thousands of samples per class.
 
-- Validation set is small (125 samples, only 33 abnormal) — single-sample changes swing reported F1 by several points. Results should be read as directional, not precise.
-- No k-fold cross-validation was used; a single 80/20 split was used throughout, which adds variance to the validation estimates above.
-- The competition deadline had passed, so no live leaderboard ranking was obtained — scores are self-assessed against other public submissions on the same dataset.
-- The CNN vs. LightGBM comparison conflates two variables at once (model family AND feature representation) — not a controlled experiment.
+Note the validation-to-test gap: CNNs drop **0.91 → 0.725–0.747**, while LightGBM drops **0.96 → 0.883**.
 
+---
+
+## ⚠️ Limitations
+
+- **Small validation set** (125 samples, only 33 abnormal): a single sample can swing F1 by several points. Read results as directional.
+- **No k-fold cross-validation**: a single 80/20 split was used throughout.
+- **Validation set used for tuning *and* reporting**: the decision threshold (and early stopping) were chosen on the same validation data whose scores are reported, so validation F1 is slightly optimistic. The Kaggle test score is the cleaner number.
+- **Confounded comparison**: CNN vs. LightGBM changes model family, feature representation *and* how much of each clip is used, so this is not a controlled experiment.
+- **No live leaderboard rank**: the deadline had passed, so scores are self-assessed.
+
+## 🚀 Future Work
+
+- Stratified **k-fold cross-validation** with thresholds picked inside the folds
+- **Ablations:** LightGBM on spectrogram features, CNN on hand-crafted features, CNN on full-length clips
+- Audio-pretrained embeddings (e.g. **YAMNet / PANNs / AST**) instead of ImageNet weights
+- **SpecAugment**, ensembling CNN + LightGBM probabilities, SHAP analysis of which features matter
+
+---
+
+## 📁 Repository Structure
+
+```
+Pump-Acoustic-Anomaly-Detection/
+├── main.ipynb        # Full pipeline: EDA, CNN, MobileNetV2, LightGBM, submissions, plots
+├── README.md
+└── assets/
+    ├── results_comparison.png
+    └── confusion_matrices_comparison.png
+```
+
+## ▶️ Getting Started
+
+The notebook is written for **Google Colab** (paths use `/content/`).
+
+1. Click the **Open in Colab** badge above.
+2. Download `train.zip` and `test.zip` (plus `sample_submission.csv`) from the Kaggle *AI Paradox* competition page and upload them to the Colab session. The data is not included in this repo.
+3. Run the cells top to bottom. Training uses a fixed split (`random_state=42`) and takes a few minutes on a free GPU.
+
+To run locally instead, install `librosa tensorflow lightgbm scikit-learn pandas matplotlib seaborn tqdm` and change the `/content/...` paths.
+
+---
+
+<div align="center">
+
+**Muhammad Sarim Umer** · [GitHub](https://github.com/MuhammadSarimUmer)
+
+⭐ If you found this useful, consider starring the repo.
+
+</div>
